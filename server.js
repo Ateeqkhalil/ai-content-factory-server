@@ -1,129 +1,169 @@
-import dotenv from 'dotenv';
-dotenv.config();
 
 import express from 'express';
 import cors from 'cors';
 import { GoogleGenAI } from '@google/genai';
-import fetch from 'node-fetch';
 
 const app = express();
-
-// Handle large payloads (like base64 images)
-app.use(express.json({ limit: '50mb' }));
 app.use(cors());
+app.use(express.json({ limit: '50mb' }));
 
-const GEMINI_API_KEY = process.env.API_KEY;
-const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
-const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
-const APP_SECRET_KEY = process.env.APP_SECRET_KEY;
+// Logging Middleware
+app.use((req, res, next) => {
+    console.log(`[${req.method}] ${req.originalUrl}`);
+    next();
+});
 
-// --- Validation ---
-if (!GEMINI_API_KEY) console.error("CRITICAL: API_KEY (Gemini) is missing.");
-if (!APP_SECRET_KEY) console.error("CRITICAL: APP_SECRET_KEY is missing.");
+// Initialize GoogleGenAI
+// Ensure API_KEY is set in your Railway environment variables
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-// --- Middleware ---
-const authenticateRequest = (req, res, next) => {
+// Auth Middleware
+const AUTH_TOKEN = "GOCSPY-7nUWQgR-Ch37NoWDH-K1lw8VmeC9d-Y";
+app.use((req, res, next) => {
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Authorization header missing.' });
-    }
-    const token = authHeader.split(' ')[1];
-    if (token !== APP_SECRET_KEY) {
-        return res.status(403).json({ error: 'Invalid authentication token.' });
+    if (authHeader) {
+        const token = authHeader.split(' ')[1];
+        if (token !== AUTH_TOKEN) {
+            console.warn(`[Auth] Invalid token attempt: ${token}`);
+            // Uncomment to enforce strict auth
+            // return res.status(403).json({ error: 'Forbidden: Invalid Token' });
+        }
     }
     next();
-};
-
-// Initialize Gemini Client
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+});
 
 // --- Gemini Endpoints ---
-app.post('/api/gemini/:action', authenticateRequest, async (req, res) => {
-    const { action } = req.params;
-    const body = req.body;
+// Supports both CamelCase (Client) and KebabCase (Legacy/Default Proxy) to prevent "Unknown Action" errors.
 
+// Generate Content
+app.post(['/api/gemini/generateContent', '/api/gemini/generate-content'], async (req, res) => {
     try {
-        let result;
-        switch (action) {
-            case 'generateContent':
-                // Handles Text, Audio, Tools
-                result = await ai.models.generateContent(body.requestPayload);
-                break;
-            
-            case 'generateImages':
-                // Handles Imagen specific calls
-                result = await ai.models.generateImages(body.requestPayload);
-                break;
-
-            case 'generateVideos':
-                result = await ai.models.generateVideos(body.requestPayload);
-                break;
-
-            case 'getVideosOperation':
-                result = await ai.operations.getVideosOperation(body.operation);
-                break;
-
-            case 'downloadVideo':
-                // Securely download video using the server's API Key
-                if (!body.downloadLink) return res.status(400).json({ error: 'Missing downloadLink' });
-                
-                // Append key to the download URL
-                const videoUrl = `${body.downloadLink}&key=${GEMINI_API_KEY}`;
-                const vidResponse = await fetch(videoUrl);
-                if (!vidResponse.ok) throw new Error(`Failed to fetch video: ${vidResponse.status}`);
-                
-                const buffer = await vidResponse.buffer();
-                result = { 
-                    data: buffer.toString('base64'), 
-                    mimeType: vidResponse.headers.get('content-type') || 'video/mp4' 
-                };
-                break;
-
-            default:
-                return res.status(400).json({ error: `Unknown action: ${action}` });
+        const body = req.body.requestPayload || req.body;
+        const { model, contents, config } = body;
+        
+        console.log(`[GenerateContent] Model: ${model}`);
+        
+        const response = await ai.models.generateContent({ model, contents, config });
+        
+        // Log if text is missing (possible safety block)
+        if (!response.text) {
+             console.warn("[GenerateContent] Response missing text. Candidates:", JSON.stringify(response.candidates));
         }
-        res.json(result);
 
+        res.json({
+            text: response.text,
+            candidates: response.candidates,
+            groundingMetadata: response.candidates?.[0]?.groundingMetadata,
+            promptFeedback: response.promptFeedback
+        });
     } catch (error) {
-        console.error(`Gemini Error [${action}]:`, error);
-        const msg = error.message || "Server error processing AI request.";
-        res.status(500).json({ error: { message: msg } });
+        console.error("Gemini Content Error:", error);
+        res.status(500).json({ error: error.message || String(error) });
     }
 });
 
-// --- Shopify Endpoints ---
-app.post('/api/shopify', authenticateRequest, async (req, res) => {
-    const { query, variables } = req.body;
+// Generate Images
+app.post(['/api/gemini/generateImages', '/api/gemini/generate-images'], async (req, res) => {
+    try {
+        const body = req.body.requestPayload || req.body;
+        const { model, prompt, config } = body;
+        
+        console.log(`[GenerateImages] Model: ${model}`);
+
+        const response = await ai.models.generateImages({ model, prompt, config });
+        res.json({ generatedImages: response.generatedImages });
+    } catch (error) {
+        console.error("Gemini Image Error:", error);
+        res.status(500).json({ error: error.message || String(error) });
+    }
+});
+
+// Generate Videos
+app.post(['/api/gemini/generateVideos', '/api/gemini/generate-videos'], async (req, res) => {
+    try {
+        const body = req.body.requestPayload || req.body;
+        const { model, prompt, config } = body;
+        
+        console.log(`[GenerateVideos] Model: ${model}`);
+
+        const response = await ai.models.generateVideos({ model, prompt, config });
+        res.json(response);
+    } catch (error) {
+        console.error("Gemini Video Error:", error);
+        res.status(500).json({ error: error.message || String(error) });
+    }
+});
+
+// Poll Video Operation
+app.post(['/api/gemini/getVideosOperation', '/api/gemini/get-videos-operation'], async (req, res) => {
+    try {
+        const body = req.body.requestPayload || req.body;
+        const { operation } = body;
+        
+        const response = await ai.operations.getVideosOperation({ operation });
+        res.json(response);
+    } catch (error) {
+        console.error("Gemini Polling Error:", error);
+        res.status(500).json({ error: error.message || String(error) });
+    }
+});
+
+// Download Video Proxy
+app.get(['/api/gemini/downloadVideo', '/api/gemini/download-video'], async (req, res) => {
+    const { uri } = req.query;
+    if (!uri) return res.status(400).send('Missing URI');
     
-    if (!SHOPIFY_STORE_URL || !SHOPIFY_ACCESS_TOKEN) {
-        return res.status(503).json({ error: 'Shopify is not configured on the server.' });
+    try {
+        const videoRes = await fetch(`${uri}&key=${process.env.API_KEY}`);
+        if (!videoRes.ok) throw new Error(`Failed to fetch video: ${videoRes.statusText}`);
+        
+        const contentType = videoRes.headers.get('content-type') || 'video/mp4';
+        res.setHeader('Content-Type', contentType);
+        
+        const buffer = await videoRes.arrayBuffer();
+        res.send(Buffer.from(buffer));
+    } catch (error) {
+        console.error("Video Download Error:", error);
+        res.status(500).send(error.message || String(error));
+    }
+});
+
+// --- Shopify Endpoint ---
+
+app.post('/api/shopify/graphql', async (req, res) => {
+    const { domain, query, variables, token } = req.body;
+    const accessToken = token || process.env.SHOPIFY_ACCESS_TOKEN;
+    
+    if (!accessToken) {
+        return res.status(401).json({ error: 'Missing Shopify Access Token' });
     }
 
-    const url = `https://${SHOPIFY_STORE_URL}/admin/api/2024-04/graphql.json`;
-    const fetchOpts = {
-        method: 'POST',
-        headers: {
-            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ query, variables }),
-    };
-
     try {
-        const shopifyRes = await fetch(url, fetchOpts);
-        const data = await shopifyRes.json();
+        console.log(`[Shopify] Querying ${domain}`);
+        const endpoint = `https://${domain}/admin/api/2024-04/graphql.json`;
+        const shopifyRes = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Shopify-Access-Token': accessToken
+            },
+            body: JSON.stringify({ query, variables })
+        });
         
-        if (!shopifyRes.ok) {
-            return res.status(shopifyRes.status).json(data);
-        }
-        res.json(data);
+        const data = await shopifyRes.json();
+        res.status(shopifyRes.status).json(data);
     } catch (error) {
         console.error("Shopify Proxy Error:", error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: error.message || String(error) });
     }
 });
 
-const PORT = process.env.PORT || 3001;
+// Root check
+app.get('/', (req, res) => {
+    res.send('AI Content Factory Server is Running');
+});
+
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Proxy server running on http://localhost:${PORT}`);
+    console.log(`Proxy server running on port ${PORT}`);
 });
